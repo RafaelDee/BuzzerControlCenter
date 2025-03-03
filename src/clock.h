@@ -1,5 +1,6 @@
 #include <Arduino.h>
-
+#ifndef CLOCK_H
+#define CLOCK_H
 class Clock
 {
 public:
@@ -13,3 +14,4 @@ public:
     return passed;
   }
 };
+#endif

@@ -2,6 +2,7 @@
 #include <map>
 #include <array>
 #include <queue>
+static const uint32_t NO_TOKEN = UINT32_MAX;
 enum class serialReceiveCommands
 {
     Acknowledge,
@@ -15,7 +16,8 @@ enum class serialReceiveCommands
     SpotLightPodium,
     SwapPodium,
     PodiumBrightness,
-    PodiumColor
+    PodiumColor,
+    ClearPodium
 };
 
 enum class serialSendCommands
@@ -27,64 +29,84 @@ enum class serialSendCommands
     HeartbeatCmd,
     PodiumAdded,
     PodiumPlacement,
-    BattStat
+    BattStat,
+    GameState,
+    SpotLightPodium,
+    PodiumBrightness,
 };
 struct Command
 {
     uint32_t idempotencyToken;
     int command;
     String payload;
+    Command() : payload("") {}
+    Command(uint32_t idempotencyToken, int command) : idempotencyToken(idempotencyToken), command(command) {}
+    Command(uint32_t idempotencyToken, int command, String payload) : idempotencyToken(idempotencyToken), command(command), payload(payload) {}
 };
 class SerialQueueManager
 {
 
     struct QueueItem
     {
-        int command;
         unsigned long firstAttempt = 0;
         unsigned long lastAttempt = 0;
         int attempts = 0;
-        bool acknowledged = false;
-        String payload;
-        QueueItem() {}
-        QueueItem(int command) : command(command) {}
-        QueueItem(int command,
-                  String &payload) : command(command), payload(payload) {}
+        Command command;
+        QueueItem() : command() {}
+        QueueItem(Command command) : command(command) {}
     };
     uint32_t nextRequestId = 1;
     std::map<uint32_t, QueueItem> messageQueue;
+    std::map<uint32_t, Command> messageRequestQueue;
     const unsigned long RETRY_INTERVAL = 200;
     const int MAX_ATTEMPTS = 5;
 
 public:
-    uint32_t queueMessage(int command)
+    uint32_t queueMessage(int command, uint32_t responseToken = NO_TOKEN)
     {
-        Serial.print("QUEUEING: ");
-        Serial.print(command);
-        Serial.println();
-        uint32_t idempotencyToken = nextRequestId++;
-        messageQueue[idempotencyToken] = QueueItem(command);
-        return idempotencyToken;
+        if (responseToken == NO_TOKEN)
+        {
+            responseToken = nextRequestId++;
+            messageQueue[responseToken] = QueueItem(Command(responseToken, command));
+        }
+        else
+        {
+            Command cmd(responseToken, command);
+            messageRequestQueue[responseToken] = cmd;
+            sendQueueCommand(cmd);
+        }
+
+        return responseToken;
     }
-    uint32_t queueMessage(int command,
+    uint32_t queueMessage(int command, uint32_t responseToken,
                           String &payload)
     {
-        Serial.print("QUEUEING: ");
-        Serial.print(command);
-        Serial.print(" : ");
-        Serial.print(payload);
-        Serial.println();
-        uint32_t idempotencyToken = nextRequestId++;
-        messageQueue[idempotencyToken] = QueueItem(command, payload);
-        Serial.print("Queued payload check: ");
-        Serial.println(messageQueue[idempotencyToken].payload);
-        return idempotencyToken;
+        if (responseToken == NO_TOKEN)
+        {
+            responseToken = nextRequestId++;
+            messageQueue[responseToken] = QueueItem(Command(responseToken, command, payload));
+        }
+        else
+        {
+            Command cmd(responseToken, command, payload);
+            messageRequestQueue[responseToken] = cmd;
+            sendQueueCommand(cmd);
+        }
+        return responseToken;
+    }
+    void sendQueueCommand(Command command)
+    {
+        Serial.print('/');
+        Serial.print(command.idempotencyToken);
+        Serial.print(':');
+        Serial.print(command.command);
+        Serial.print(' ');
+        Serial.println(command.payload);
     }
     void update()
     {
 
         readSerial(); // Add this to process incoming commands
-
         if (messageQueue.empty())
             return;
 
@@ -96,12 +118,7 @@ public:
         if (item.attempts == 0 ||
             (currentTime - item.lastAttempt >= RETRY_INTERVAL))
         {
-            Serial.print('/');
-            Serial.print(itemId);
-            Serial.print(':');
-            Serial.print(item.command);
-            Serial.print(' ');
-            Serial.println(item.payload);
+            sendQueueCommand(item.command);
             // SendToUI(itemId, item.command.command, item.command.payload);
 
             item.lastAttempt = currentTime;
@@ -111,9 +128,10 @@ public:
             {
                 messageQueue.erase(itemId);
             }
+            delay(1); // Add a small delay to yield control
         }
-        delay(1); // Add a small delay to yield control
     }
+
     template <typename... Args>
     /* void SendToUI(uint32_t idempotencyToken, Args... args)
     {
@@ -137,10 +155,11 @@ public:
         Serial.print(':');
         Serial.println(static_cast<int>(serialSendCommands::Acknowledge));
     }
-    /**ACK received message, do not broadcast ACK packet */
+    /**ACK received message, stop sending it again, do not broadcast ACK packet */
     void acknowledgeReceivedMessage(uint32_t idempotencyToken)
     {
-        Serial.println("ACK:");
+        Serial.print("ACK:");
+        Serial.println(idempotencyToken);
         messageQueue.erase(idempotencyToken);
         /*  auto it = messageQueue.find(idempotencyToken);
          if (it != messageQueue.end())
@@ -160,12 +179,12 @@ public:
     {
         ReceiveCommandQueue queue = readQueue.front();
         readQueue.pop();
-        sendACK(queue.idempotencyToken);
-        Serial.print("READING:");
-        Serial.println(queue.payload);
+        // sendACK(queue.idempotencyToken);
         // does not need to be checked if index is null, already checked before inserting
-        int command = queue.payload[0] - '0';
-        return {queue.idempotencyToken, command, queue.payload.substring(2)};
+        int colonPos = queue.payload.indexOf(' ');
+        String idStr = queue.payload.substring(0, colonPos);
+        int command = idStr.toInt();
+        return {queue.idempotencyToken, command, queue.payload.substring(colonPos + 1)};
     }
 
 private:
@@ -199,11 +218,6 @@ private:
     std::vector<uint32_t> receivedCommandTokens;
     void processCommand(String buffer)
     {
-        if (buffer.length() < 2)
-        {
-            Serial.println("Invalid Command");
-            return;
-        }
         int colonPos = buffer.indexOf(':');
         if (colonPos == -1 || colonPos + 1 >= buffer.length())
         {
@@ -215,11 +229,8 @@ private:
         /**checks if request is already received, if so, ignore*/
 
         int command = buffer[colonPos + 1] - '0';
-        Serial.print("COMMAND:");
-        Serial.println(buffer[colonPos + 1]);
         if (command == (int)serialReceiveCommands::Acknowledge)
         {
-            Serial.println("ACKNOWLEDGED");
             acknowledgeReceivedMessage(idempotencyToken);
             return;
         }
@@ -227,15 +238,16 @@ private:
     }
     void addToQueue(uint32_t idempotencyToken, String buffer)
     {
-        /**checks if request is already received, if so, send ACK*/
+        /**checks if request is already received, if so, resend response or none if pending*/
         if (std::find(receivedCommandTokens.begin(), receivedCommandTokens.end(), idempotencyToken) != receivedCommandTokens.end())
         {
-            return;
-        }
+            // send previous response
 
-        if (buffer.length() < 1 || buffer.length() == 2)
-        {
-            Serial.println("Invalid Command");
+            auto it = messageRequestQueue.find(idempotencyToken);
+            if (it != messageRequestQueue.end())
+            {
+                sendQueueCommand(it->second);
+            }
             return;
         }
         readQueue.push({idempotencyToken, buffer});
@@ -244,6 +256,10 @@ private:
         if (receivedCommandTokens.size() > maxCommandTokens)
         {
             receivedCommandTokens.erase(receivedCommandTokens.begin());
+        }
+        if (messageRequestQueue.size() > maxCommandTokens)
+        {
+            messageRequestQueue.erase(messageRequestQueue.begin());
         }
     }
 };
