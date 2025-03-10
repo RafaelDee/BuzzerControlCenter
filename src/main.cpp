@@ -17,6 +17,7 @@
 #include "nvs_flash.h"
 #include <Preferences.h>
 #define BOARD "ESP32"
+#define FIRM_VER "1.4.2"
 // ESP32 specific defines can go here
 #else
 #error "This code is intended for ESP8266 or ESP32 boards only!"
@@ -27,6 +28,7 @@
 #include <sstream>
 #include <clock.h>
 #include <serialQueueManager.h>
+bool verboseMode = false;
 // Create a struct_message called myData
 typedef struct PodiumData
 {
@@ -89,6 +91,7 @@ enum class GameState
 };
 
 Networking networking;
+// podium positions who ans first
 uint8_t buttonPlacement = 0;
 SerialQueueManager serialManager;
 unsigned long dnrTickDuration = Networking::heartbeatDuration * 2;
@@ -96,9 +99,10 @@ int podiumAnsweredFirst = -1;
 template <typename T>
 void sendToAll(T packet)
 {
-  for (const auto& [macAddr, podium] : podiumsMap) {
-      networking.sendPacket(macAddr.data(), packet);
-      delay(1); // Small delay to prevent packet collisions
+  for (const auto &[macAddr, podium] : podiumsMap)
+  {
+    networking.sendPacket(macAddr.data(), packet);
+    delay(1); // Small delay to prevent packet collisions
   }
 }
 
@@ -119,8 +123,11 @@ void SendToUI(serialSendCommands command, uint32_t responseToken, Args... args)
     result += (args),
     first = false),
    ...);
-  Serial.print("Sending:");
-  Serial.println(result);
+  if (verboseMode)
+  {
+    Serial.print("Sending:");
+    Serial.println(result);
+  }
   serialManager.queueMessage(static_cast<int>(command), responseToken, result);
 }
 uint8_t spottedPodium = NO_PIN;
@@ -130,9 +137,18 @@ void setCurrentGameState(GameState state)
   currentGameState = state;
   int castedState = static_cast<int>(currentGameState);
   if (castedState == NAN)
+  {
+    if (verboseMode)
+    {
+      Serial.print("invalid casted state");
+    }
     return;
-  Serial.print("GAME STATE: ");
-  Serial.print(castedState);
+  }
+  if (verboseMode)
+  {
+    Serial.print("GAME STATE: ");
+    Serial.print(castedState);
+  }
   SendToUI(serialSendCommands::GameState, NO_TOKEN, castedState);
 }
 
@@ -155,6 +171,25 @@ void suspenseAnswer()
     }
   } */
 }
+void spotLightPodium(uint8_t index, boolean flash)
+{
+  if (index < 0 /* || index >= podiumsMap.size() */)
+    return;
+  // send to all
+  if (verboseMode)
+  {
+    Serial.print("sending spotlight to: ");
+    Serial.println(index);
+  }
+  for (const auto &[macAddr, podium] : podiumsMap)
+  {
+    SpotlightDirection dir = podium.position == index ? SpotlightDirection::Self : podium.position < index ? SpotlightDirection::Left
+                                                                                                           : SpotlightDirection::Right;
+    networking.sendPacket(macAddr.data(), SpotlightPacket(dir, flash));
+  }
+  spottedPodium = index;
+  // sendToAll(SpotlightPacket(index, flash));
+}
 void addPeer(const std::array<uint8_t, 6> mac_addr, bool catchUpServer, bool saveToMem = true);
 
 void initializeClient(const std::array<uint8_t, 6> mac_addr, bool saveToMem = true)
@@ -170,27 +205,29 @@ void initializeClient(const std::array<uint8_t, 6> mac_addr, bool saveToMem = tr
     initializeClient(mac_addr, saveToMem);
     return;
   }
-  Serial.print("Client Initialized with podium position:");
-  Serial.println(it->second.position);
   auto macAddr = mac_addr.data();
   SendToUI(serialSendCommands::PodiumAdded, NO_TOKEN, it->second.position, static_cast<int>(it->second.dnrSeverity), arrayToString(it->first));
+  delay(1);
   networking.sendPacket<InitPacket>(macAddr, InitPacket(it->second.position, it->second.isButtonPressed));
+  delay(1);
   networking.sendPacket<LedBrightnessPacket>(macAddr, LedBrightnessPacket(podiumBrightnessFce, podiumBrightnessBtn));
-  Serial.print("SENDING GAME STATE:");
-  Serial.println((int)currentGameState);
+  delay(1);
+  networking.sendPacket<BatteryPingPacket>(macAddr, BatteryPingPacket());
+  delay(1);
   switch (currentGameState)
   {
   case GameState::SuspenseAns:
     suspenseAnswer();
-    networking.sendPacket(macAddr, SpotlightPacket(podiumAnsweredFirst, false));
     /* code */
     break;
   case GameState::QuizAnswered:
-    networking.sendPacket(macAddr, SpotlightPacket(podiumAnsweredFirst, false));
+    spotLightPodium(podiumAnsweredFirst, false);
+    // networking.sendPacket(macAddr, SpotlightPacket(podiumAnsweredFirst, false));
     /* code */
     break;
   case GameState::Spotlight:
-    networking.sendPacket(macAddr, SpotlightPacket(spottedPodium, false));
+    spotLightPodium(spottedPodium, false);
+    // networking.sendPacket(macAddr, SpotlightPacket(spottedPodium, false));
     /* code */
     break;
   case GameState::CorrectAns:
@@ -239,8 +276,11 @@ void savePodiumOrder()
     podiumOrder += arrayToString(podMacAddr);
     first = false;
   }
-  Serial.print("SAVING: ");
-  Serial.println(podiumOrder);
+  if (verboseMode)
+  {
+    Serial.print("SAVING: ");
+    Serial.println(podiumOrder);
+  }
   preferences.putString("order", podiumOrder);
 }
 void addPeer(const std::array<uint8_t, 6> mac_addr, bool catchUpServer, bool saveToMem)
@@ -266,8 +306,11 @@ void addPeer(const std::array<uint8_t, 6> mac_addr, bool catchUpServer, bool sav
   if (catchUpServer)
     initializeClient(mac_addr);
   SendToUI(serialSendCommands::Dnr, NO_TOKEN, podiumsMap[mac_addr].position, (int)DnrSeverity::ok);
-  Serial.print("Sucessfully added peer with position: ");
-  Serial.println(podiumsMap[mac_addr].position);
+  if (verboseMode)
+  {
+    ("Sucessfully added peer with position: ");
+    Serial.println(podiumsMap[mac_addr].position);
+  }
 }
 
 void DeviceResponded(std::array<uint8_t, 6> mac_addr)
@@ -288,26 +331,25 @@ void DeviceResponded(std::array<uint8_t, 6> mac_addr)
   }
   podiumsMap[mac_addr].dnrCount = respCount;
 }
-void spotLightPodium(uint8_t index, boolean flash)
-{
-  if (index < 0 || index >= podiumsMap.size())
-    return;
-  // send to all
-  Serial.print("sending spotlight to: ");
-  Serial.println(index);
-  spottedPodium = index;
-  sendToAll(SpotlightPacket(index, flash));
-}
+
 // callback function that will be executed when data is received
 
 void buttonPressed(std::array<uint8_t, 6> mac_addr)
 {
   if (!(currentGameState == GameState::QuizReady || currentGameState == GameState::QuizAnswered))
+  {
+    Serial.print("GameState not satisfied state:");
+    Serial.println((int)currentGameState);
     return;
-
+  }
   int btnIndex = podiumsMap[mac_addr].position;
   if (podiumsMap[mac_addr].isButtonPressed)
+  {
+    Serial.print("BUTTON ");
+    Serial.print(btnIndex);
+    Serial.println(" ALREADY PRESSED");
     return;
+  }
   SendToUI(serialSendCommands::PodiumPlacement, NO_TOKEN, btnIndex, buttonPlacement);
   if (buttonPlacement == 0 && currentGameState == GameState::QuizReady)
   {
@@ -431,6 +473,8 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, const int len)
 
 void OnDataSent(const uint8_t *mac_addr, const esp_now_send_status_t status)
 {
+  if (!verboseMode)
+    return;
   Serial.print("\r\nLast Packet Send Status:\t");
   Serial.print(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success: " : "Delivery Fail: ");
   char macStr[18];
@@ -444,11 +488,11 @@ void resetGameState(uint32_t responseToken)
   buttonPlacement = 0;
   spottedPodium = NO_PIN;
   sendToAll(ResetStatePacket());
-  /* for (std::map<std::array<uint8_t, 6>, PodiumData>::iterator it = podiumsMap.begin(); it != podiumsMap.end(); ++it)
+  for (std::map<std::array<uint8_t, 6>, PodiumData>::iterator it = podiumsMap.begin(); it != podiumsMap.end(); ++it)
   {
     it->second.isButtonPressed = false;
-    networking.sendPacket(it->first.data(), );
-  } */
+    it->second.buttonPlacement = 0;
+  }
   SendToUI(serialSendCommands::Acknowledge, responseToken);
 }
 std::array<uint8_t, 6> parseCharToArray(const char *input)
@@ -470,9 +514,11 @@ std::array<uint8_t, 6> parseCharToArray(const char *input)
 }
 void initPodiums(String storedValue)
 {
-  Serial.print("SAVED: ");
-  Serial.println(storedValue);
-
+  if (verboseMode)
+  {
+    Serial.print("SAVED: ");
+    Serial.println(storedValue);
+  }
   int start = 0;
   int index = 0;
 
@@ -486,8 +532,11 @@ void initPodiums(String storedValue)
 
     String token = storedValue.substring(start, end);
     const std::array<uint8_t, 6U> macArray = parseCharToArray(token.c_str());
-    Serial.print("init mac: ");
-    Serial.println(token);
+    if (verboseMode)
+    {
+      Serial.print("init mac: ");
+      Serial.println(token);
+    }
     addPeer(macArray, false, false);
 
     index++;
@@ -544,10 +593,15 @@ void DnrTick()
     return;
   RunDnr();
 }
+void DeviceInfo()
+{
 
+  SendToUI(serialSendCommands::DeviceInfo, NO_TOKEN, FIRM_VER + String(verboseMode ? "-debug" :" "));
+}
 void showSummary(uint32_t responseToken)
 {
   SendToUI(serialSendCommands::Acknowledge, responseToken);
+  DeviceInfo();
   paired = true;
   for (const auto &[macAddr, podium] : podiumsMap)
   {
@@ -617,6 +671,10 @@ void parseBrightness(String payload)
   int btnBright = payload.substring(firstComma + 1).toInt();
   setPodiumBrightness(fceBright, btnBright, {});
 }
+void setVerboseMode(String payload)
+{
+  verboseMode = payload.charAt(0) == '1';
+}
 void processUICommand(Command command)
 {
 
@@ -627,12 +685,15 @@ void processUICommand(Command command)
     /* code */
     break;
   case (int)serialReceiveCommands::ResetGameState:
-    resetGameState(command.idempotencyToken);
     setCurrentGameState(GameState::Idle);
+    resetGameState(command.idempotencyToken);
     break;
   case (int)serialReceiveCommands::ReadyGameState:
-    resetGameState(command.idempotencyToken);
     setCurrentGameState(GameState::QuizReady);
+    resetGameState(command.idempotencyToken);
+    break;
+  case (int)serialReceiveCommands::SendDeviceInfo:
+    DeviceInfo();
     break;
   case (int)serialReceiveCommands::Summary:
     showSummary(command.idempotencyToken);
@@ -669,10 +730,15 @@ void processUICommand(Command command)
   case (int)serialReceiveCommands::PodiumBrightness:
     if (!Networking::hasPayloadLength(command.payload, 2))
       return;
-
     SendToUI(serialSendCommands::Acknowledge, command.idempotencyToken);
     parseBrightness(command.payload);
     return;
+    break;
+  case (int)serialReceiveCommands::VerboseMode:
+    if (!Networking::hasPayloadLength(command.payload, 1))
+      return;
+    SendToUI(serialSendCommands::Acknowledge, NO_TOKEN);
+    setVerboseMode(command.payload);
     break;
     /* default:
       Serial.println("NOT A COMMAND");

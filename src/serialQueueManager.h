@@ -17,7 +17,9 @@ enum class serialReceiveCommands
     SwapPodium,
     PodiumBrightness,
     PodiumColor,
-    ClearPodium
+    ClearPodium,
+    VerboseMode,
+    SendDeviceInfo
 };
 
 enum class serialSendCommands
@@ -33,6 +35,7 @@ enum class serialSendCommands
     GameState,
     SpotLightPodium,
     PodiumBrightness,
+    DeviceInfo
 };
 struct Command
 {
