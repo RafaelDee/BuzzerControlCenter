@@ -102,7 +102,7 @@ void sendToAll(T packet)
   for (const auto &[macAddr, podium] : podiumsMap)
   {
     networking.sendPacket(macAddr.data(), packet);
-    delay(1); // Small delay to prevent packet collisions
+    delay(5); // Small delay to prevent packet collisions
   }
 }
 
@@ -186,6 +186,7 @@ void spotLightPodium(uint8_t index, boolean flash)
     SpotlightDirection dir = podium.position == index ? SpotlightDirection::Self : podium.position < index ? SpotlightDirection::Left
                                                                                                            : SpotlightDirection::Right;
     networking.sendPacket(macAddr.data(), SpotlightPacket(dir, flash));
+    delay(5);
   }
   spottedPodium = index;
   // sendToAll(SpotlightPacket(index, flash));
@@ -596,7 +597,7 @@ void DnrTick()
 void DeviceInfo()
 {
 
-  SendToUI(serialSendCommands::DeviceInfo, NO_TOKEN, FIRM_VER + String(verboseMode ? "-debug" :" "));
+  SendToUI(serialSendCommands::DeviceInfo, NO_TOKEN, FIRM_VER + String(verboseMode ? "-debug" : " "));
 }
 void showSummary(uint32_t responseToken)
 {
